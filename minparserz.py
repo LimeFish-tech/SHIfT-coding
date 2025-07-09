@@ -9,7 +9,7 @@ class PostgresLogParser:
     def __init__(self, log_file_path):
         self.log_file_path = log_file_path
         self.log_pattern = re.compile(
-            r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: UTC)?).*?statement: (.*?)(?:;|$)',
+            r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: UTC)?).*?:\s+(.*?)(?:;|$)',
             re.IGNORECASE
         )
         self.string_pattern = re.compile(r"'(?:''|[^'])*'")
@@ -21,11 +21,13 @@ class PostgresLogParser:
         self.buffer_size = 1000
         self.run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.base_name = os.path.splitext(os.path.basename(log_file_path))[0]
-        self.archive_name = f"{self.base_name}-{self.run_timestamp}.tar.gz"
+        self.archive_name = f"{self.base_name}-minute_parser-{self.run_timestamp}.tar.gz"
+        self.summary_filename = f"summary_minute_{self.base_name}.log"
 
     def parse(self):
         output_files = {}
         current_query = None
+        current_timestamp = None
 
         try:
             with open(self.log_file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -37,7 +39,13 @@ class PostgresLogParser:
                     if line[0].isdigit():
                         if current_query:
                             self.buffer_query(current_query, output_files)
-                        current_query = self.extract_query(line)
+                        match = self.log_pattern.match(line)
+                        if match:
+                            timestamp, sql = match.groups()
+                            current_timestamp = timestamp.strip()
+                            current_query = {'timestamp': current_timestamp, 'sql': sql.strip()}
+                        else:
+                            current_query = None
                     elif current_query:
                         current_query['sql'] += ' ' + line
         finally:
@@ -50,14 +58,6 @@ class PostgresLogParser:
             self.generate_combined_summary()
             self.compress_results()
             self.cleanup_files()
-
-    def extract_query(self, line):
-        match = self.log_pattern.match(line)
-        if not match:
-            return None
-
-        timestamp, sql = match.groups()
-        return {'timestamp': timestamp.strip(), 'sql': sql.strip()}
 
     def buffer_query(self, query, output_files):
         if not query or 'sql' not in query:
@@ -132,16 +132,15 @@ class PostgresLogParser:
 
                         stats[minute_key][normalized_sql] += 1
 
-        with open("combined_summary.log", 'w', encoding='utf-8') as sf:
+        with open(self.summary_filename, 'w', encoding='utf-8') as sf:
             for minute in sorted(stats):
                 for sql, count in sorted(stats[minute].items()):
                     sf.write(f"{minute} | {sql} | выполнился {count} раз\n")
 
     def compress_results(self):
         files_to_archive = []
-        summary_file = "combined_summary.log"
-        if os.path.exists(summary_file):
-            files_to_archive.append(summary_file)
+        if os.path.exists(self.summary_filename):
+            files_to_archive.append(self.summary_filename)
         
         for date in self.dates_seen:
             for operator in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'OTHER']:
@@ -166,7 +165,7 @@ class PostgresLogParser:
 if __name__ == '__main__':
     import sys
     if len(sys.argv) != 2:
-        print("Использование: python log_parser.py <путь_к_файлу_лога>")
+        print("Использование: python minute_parser.py <путь_к_файлу_лога>")
         sys.exit(1)
 
     parser = PostgresLogParser(sys.argv[1])
